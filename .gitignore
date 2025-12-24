@@ -29,6 +29,22 @@ config.toml
 config.yaml
 metadata.json
 
+# AWS credentials and sensitive data
+.aws/
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+credentials
+credentials.*
+!credentials.example
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
 # Database files
 *.db
 *.db-shm
