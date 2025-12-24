@@ -2,77 +2,206 @@
 inclusion: always
 ---
 
-1. ワークフローとタスク計画 (Workflow & Task Planning)
+# Rust Development Guidelines
 
-Kiro等の自律型エージェントとしてタスクリストを生成・実行する際は、以下の "Check First, Build Last" 戦略を遵守してください。
+## Build & Test Workflow
 
-基本ルール
+**"Check First, Build Last" Strategy** - Optimize development cycle by minimizing full builds.
 
-開発・修正フェーズ: コードの構文・型チェックには必ず cargo check を使用してください。この段階での cargo build は禁止です。
+### Development Phase (MUST follow)
 
-ロジック検証: 全体のテストではなく、対象の単体テストのみを cargo test <test_name> で実行してください。
+- **Syntax/Type Checking**: Use `cargo check` exclusively during development
+  - NEVER use `cargo build` until final verification
+  - `cargo check` is 10x faster and sufficient for most development iterations
 
-最終フェーズ: タスクの最後の手順としてのみ cargo build (または cargo run) を行い、バイナリ生成を確認してください。
+- **Logic Verification**: Run targeted tests only
+  ```bash
+  cargo test <test_name>           # Single test
+  cargo test <module>::<test_name> # Specific module test
+  ```
+  - Avoid `cargo test` without arguments during development
 
-2. コーディング指針 (Code Optimization Guidelines)
+- **Diagnostics**: Use `getDiagnostics` tool for immediate feedback on syntax/type errors
 
-コンパイル時間を悪化させる設計を避け、以下のパターンを優先してください。
+### Final Verification Phase
 
-A. モノモーフィゼーションの抑制 (Avoid Monomorphization)
+- **Build Verification**: Only after all checks pass
+  ```bash
+  cargo build --release  # Production build
+  cargo run -- [ARGS]    # Test execution
+  ```
 
-ジェネリクス (<T: Trait>) はコンパイル時間を増大させます。パフォーマンスがクリティカルなホットパス以外では、動的ディスパッチ (&dyn Trait / Box<dyn Trait>) を優先してください。
+## Code Optimization Patterns
 
-B. Inner Function パターン
+**Goal**: Minimize compilation time without sacrificing runtime performance where it matters.
 
-パブリックAPIでジェネリクスが必要な場合、実装の詳細を非ジェネリックな内部関数に委譲してください。
+### Monomorphization Control
 
-// 推奨パターン
-pub fn heavy_logic<T: AsRef<Path>>(path: T) {
+**Problem**: Generics create separate code copies for each concrete type, increasing compile time exponentially.
+
+**Solution**: Use dynamic dispatch except in hot paths.
+
+```rust
+// ❌ Avoid: Creates code for every T
+pub fn process<T: AsRef<str>>(items: Vec<T>) {
+    for item in items {
+        // complex logic here
+    }
+}
+
+// ✅ Prefer: Single code path
+pub fn process(items: &[&dyn AsRef<str>]) {
+    for item in items {
+        // complex logic here
+    }
+}
+
+// ✅ Or use trait objects
+pub fn process(items: Vec<Box<dyn AsRef<str>>>) { ... }
+```
+
+### Inner Function Pattern
+
+**When**: Public API requires generics for ergonomics.
+
+**Pattern**: Delegate to non-generic inner function.
+
+```rust
+// Public API: Generic for convenience
+pub fn heavy_logic<T: AsRef<Path>>(path: T) -> Result<()> {
     heavy_logic_inner(path.as_ref())
 }
-// ここにロジックを集約（コード生成は1回のみ）
-fn heavy_logic_inner(path: &Path) { ... }
 
+// Implementation: Non-generic, compiled once
+fn heavy_logic_inner(path: &Path) -> Result<()> {
+    // All logic here
+}
+```
 
-C. 依存関係の最小化
+### Dependency Management
 
-不要なクレートの追加を避けてください。
+**Adding Dependencies**:
 
-外部クレートを追加する際は、可能な限り default-features = false を指定し、必要な機能のみを features で有効化してください。
+```toml
+# ✅ Minimal features
+serde = { version = "1.0", default-features = false, features = ["derive"] }
 
-手続き型マクロ（serde, sqlx, tokio::main 等）の使用は必要最小限に留めてください。
+# ❌ Avoid: Pulls unnecessary dependencies
+serde = "1.0"
+```
 
-D. 型推論の補助
+**Procedural Macros**: Use sparingly (they slow compilation significantly)
+- `#[derive(Serialize, Deserialize)]`: OK for data structures
+- `#[tokio::main]`: OK for entry points
+- Custom proc macros: Avoid unless critical
 
-複雑なイテレータチェーンやコンビネータには、明示的な型注釈を与えてコンパイラの推論コストを下げてください。
+### Type Inference Assistance
 
-3. 環境設定チェック (Configuration Setup)
+**Complex Chains**: Add explicit type annotations to reduce compiler inference work.
 
-プロジェクトの設定が最適化されているか確認し、未設定の場合は以下を提案してください。
+```rust
+// ❌ Compiler must infer through entire chain
+let result = data.iter().filter(|x| x.is_valid()).map(|x| x.process()).collect();
 
-リンカの高速化 (.cargo/config.toml)
+// ✅ Help the compiler
+let result: Vec<ProcessedData> = data
+    .iter()
+    .filter(|x| x.is_valid())
+    .map(|x| x.process())
+    .collect();
+```
 
-OSに応じて mold (Linux) または lld (macOS/Windows) を使用する設定。
+## Error Handling Patterns
 
-# Linux example
+**This Project Uses**:
+- `anyhow::Result<T>` for application errors
+- `thiserror` for custom error types
+- Context propagation with `.context()` or `.with_context()`
+
+```rust
+use anyhow::{Context, Result};
+
+pub fn load_config(path: &Path) -> Result<Config> {
+    let content = fs::read_to_string(path)
+        .context("Failed to read config file")?;
+    
+    serde_json::from_str(&content)
+        .with_context(|| format!("Invalid JSON in {}", path.display()))
+}
+```
+
+## Async Patterns
+
+**This Project Uses**: Tokio runtime with full features.
+
+```rust
+// ✅ Async functions
+pub async fn connect_session(instance_id: &str) -> Result<Session> {
+    let client = aws_sdk_ssm::Client::new(&aws_config::load_from_env().await);
+    // ...
+}
+
+// ✅ Spawning tasks
+tokio::spawn(async move {
+    monitor_session(session_id).await
+});
+```
+
+## Configuration Verification
+
+**Before suggesting changes**, verify current setup:
+
+1. Check `.cargo/config.toml` for linker configuration
+2. Check `Cargo.toml` for profile settings
+3. Only suggest if missing or suboptimal
+
+### Expected Linker Configuration
+
+```toml
+# .cargo/config.toml
 [target.x86_64-unknown-linux-gnu]
 linker = "clang"
 rustflags = ["-C", "link-arg=-fuse-ld=mold", "-Zshare-generics=y"]
 
-# macOS example
 [target.x86_64-apple-darwin]
 rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+```
 
-開発プロファイルの最適化 (Cargo.toml)
+### Expected Profile Configuration
 
-依存関係の最適化を行い、自身のコードのビルドは最速にする設定。
-
+```toml
+# Cargo.toml
 [profile.dev]
 opt-level = 0
-debug = 0  # デバッグ情報を減らしてリンク時間を短縮
+debug = 0  # Reduce link time
 strip = "debuginfo"
 
-# 依存関係は最適化して実行速度を確保（変更頻度が低いため）
+# Optimize dependencies (rarely change)
 [profile.dev.package."*"]
 opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+```
+
+## Code Style Conventions
+
+- **Imports**: Group by std, external crates, internal modules
+- **Error Messages**: User-facing messages in Japanese, code comments in English
+- **Naming**: Follow Rust conventions (snake_case for functions/variables, PascalCase for types)
+- **Documentation**: Public APIs must have doc comments with examples
+
+## Performance Targets
+
+When implementing features, maintain:
+- Memory usage: < 10MB
+- CPU usage: < 0.5% (idle monitoring)
+- Connection time: < 150ms
+- Reconnection detection: < 5s
