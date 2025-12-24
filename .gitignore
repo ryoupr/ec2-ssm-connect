@@ -74,3 +74,8 @@ lcov.info
 perf.data
 perf.data.old
 flamegraph.svg
+
+
+# Kiro
+.kiro/hooks
+.kiro/settings
